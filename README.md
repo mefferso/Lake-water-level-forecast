@@ -96,7 +96,7 @@ Go to:
 Actions → Build archive and train models → Run workflow
 ```
 
-The workflow uploads generated data, models, and plots as an artifact named:
+The workflow uploads generated data, models, and metrics as an artifact named:
 
 ```text
 nwcl1-training-output
