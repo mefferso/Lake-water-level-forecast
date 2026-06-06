@@ -12,6 +12,11 @@ EVENT_COLUMNS = [
     "exceed_end_utc",
     "window_start_utc",
     "window_end_utc",
+    "surge_peak_time_utc",
+    "surge_peak_water_level_ft",
+    "water_level_peak_time_utc",
+    "water_level_peak_ft",
+    "post_surge_dip_ft",
     "peak_time_utc",
     "peak_water_level_ft",
     "start_water_level_ft",
@@ -33,6 +38,9 @@ class EventSettings:
     rate_threshold_ft_per_hr: float = 0.02
     quiet_hours: float = 3.0
     safety_buffer_hours: float = 6.0
+    surge_drop_threshold_ft: float = 0.15
+    surge_drop_window_hours: float = 12.0
+    surge_rate_turn_hours: float = 3.0
 
 
 def _empty_events() -> pd.DataFrame:
@@ -55,15 +63,19 @@ def _prep_water(water: pd.DataFrame, smooth_hours: float) -> pd.DataFrame:
     return df
 
 
+def _median_step_hours(df: pd.DataFrame) -> float:
+    step = df["datetime_utc"].diff().dt.total_seconds().dropna().median() / 3600
+    if not step or pd.isna(step) or step <= 0:
+        return 0.1
+    return float(step)
+
+
 def _find_rise_start(df: pd.DataFrame, first_exceed_time: pd.Timestamp, settings: EventSettings) -> pd.Timestamp:
     search_start = first_exceed_time - pd.Timedelta(hours=settings.start_search_hours)
     segment = df[(df["datetime_utc"] >= search_start) & (df["datetime_utc"] <= first_exceed_time)].copy()
     if segment.empty:
         return first_exceed_time - pd.Timedelta(hours=settings.safety_buffer_hours)
-    median_step_hr = segment["datetime_utc"].diff().dt.total_seconds().dropna().median() / 3600
-    if not median_step_hr or pd.isna(median_step_hr) or median_step_hr <= 0:
-        median_step_hr = 0.1
-    quiet_n = max(1, int(round(settings.quiet_hours / median_step_hr)))
+    quiet_n = max(1, int(round(settings.quiet_hours / _median_step_hours(segment))))
     for i in range(len(segment) - 1, quiet_n - 1, -1):
         rates = segment.iloc[i - quiet_n : i]["rate_ft_per_hr"]
         if bool((rates <= settings.rate_threshold_ft_per_hr).all()):
@@ -77,10 +89,7 @@ def _find_recovery_end(df: pd.DataFrame, last_exceed_time: pd.Timestamp, setting
     segment = df[(df["datetime_utc"] >= last_exceed_time) & (df["datetime_utc"] <= search_end)].copy()
     if segment.empty:
         return last_exceed_time + pd.Timedelta(hours=settings.safety_buffer_hours)
-    median_step_hr = segment["datetime_utc"].diff().dt.total_seconds().dropna().median() / 3600
-    if not median_step_hr or pd.isna(median_step_hr) or median_step_hr <= 0:
-        median_step_hr = 0.1
-    quiet_n = max(1, int(round(settings.quiet_hours / median_step_hr)))
+    quiet_n = max(1, int(round(settings.quiet_hours / _median_step_hours(segment))))
     below = segment[segment["smooth_water_level_ft"] < settings.threshold_ft]
     start_idx = below.index.min() if not below.empty else segment.index.min()
     segment2 = segment.loc[start_idx:].copy()
@@ -90,6 +99,40 @@ def _find_recovery_end(df: pd.DataFrame, last_exceed_time: pd.Timestamp, setting
             return segment2.iloc[i]["datetime_utc"] + pd.Timedelta(hours=settings.safety_buffer_hours)
     min_idx = segment["smooth_water_level_ft"].idxmin()
     return segment.loc[min_idx, "datetime_utc"] + pd.Timedelta(hours=settings.safety_buffer_hours)
+
+
+def _find_surge_peak(event_df: pd.DataFrame, exceed_start: pd.Timestamp, settings: EventSettings) -> tuple[pd.Timestamp, float, float]:
+    """Find the first meaningful wind-surge crest, not necessarily the later absolute max."""
+    segment = event_df[event_df["datetime_utc"] >= exceed_start].copy()
+    if segment.empty:
+        peak_idx = event_df["smooth_water_level_ft"].idxmax()
+        return event_df.loc[peak_idx, "datetime_utc"], float(event_df.loc[peak_idx, "smooth_water_level_ft"]), 0.0
+
+    step_hr = _median_step_hours(segment)
+    drop_n = max(1, int(round(settings.surge_drop_window_hours / step_hr)))
+    turn_n = max(1, int(round(settings.surge_rate_turn_hours / step_hr)))
+
+    best_idx = segment["smooth_water_level_ft"].idxmax()
+    best_dip = 0.0
+    for pos in range(1, len(segment) - 1):
+        prev_level = segment.iloc[pos - 1]["smooth_water_level_ft"]
+        level = segment.iloc[pos]["smooth_water_level_ft"]
+        next_level = segment.iloc[pos + 1]["smooth_water_level_ft"]
+        if not (level >= prev_level and level >= next_level):
+            continue
+        future = segment.iloc[pos + 1 : pos + 1 + drop_n]
+        if future.empty:
+            continue
+        dip = float(level - future["smooth_water_level_ft"].min())
+        future_rates = future.head(turn_n)["rate_ft_per_hr"]
+        rate_turn = len(future_rates) >= turn_n and bool((future_rates < -settings.rate_threshold_ft_per_hr).all())
+        if dip >= settings.surge_drop_threshold_ft or rate_turn:
+            idx = segment.index[pos]
+            return segment.loc[idx, "datetime_utc"], float(level), dip
+        if dip > best_dip:
+            best_dip = dip
+
+    return segment.loc[best_idx, "datetime_utc"], float(segment.loc[best_idx, "smooth_water_level_ft"]), best_dip
 
 
 def _merge_overlapping_windows(events: pd.DataFrame) -> pd.DataFrame:
@@ -110,12 +153,18 @@ def _merge_overlapping_windows(events: pd.DataFrame) -> pd.DataFrame:
             current["window_end_utc"] = max(current["window_end_utc"], row_dict["window_end_utc"])
             current["duration_hours"] = (current["event_end_utc"] - current["event_start_utc"]).total_seconds() / 3600
             current["source_event_count"] += int(row_dict.get("source_event_count", 1))
-            if row_dict["peak_water_level_ft"] > current["peak_water_level_ft"]:
-                current["peak_water_level_ft"] = row_dict["peak_water_level_ft"]
-                current["peak_time_utc"] = row_dict["peak_time_utc"]
+            if row_dict["water_level_peak_ft"] > current["water_level_peak_ft"]:
+                current["water_level_peak_ft"] = row_dict["water_level_peak_ft"]
+                current["water_level_peak_time_utc"] = row_dict["water_level_peak_time_utc"]
+            if row_dict["surge_peak_water_level_ft"] > current["surge_peak_water_level_ft"]:
+                current["surge_peak_water_level_ft"] = row_dict["surge_peak_water_level_ft"]
+                current["surge_peak_time_utc"] = row_dict["surge_peak_time_utc"]
+                current["post_surge_dip_ft"] = row_dict["post_surge_dip_ft"]
+            current["peak_water_level_ft"] = current["surge_peak_water_level_ft"]
+            current["peak_time_utc"] = current["surge_peak_time_utc"]
             current["start_water_level_ft"] = min(current["start_water_level_ft"], row_dict["start_water_level_ft"])
             current["end_water_level_ft"] = min(current["end_water_level_ft"], row_dict["end_water_level_ft"])
-            current["rise_ft"] = current["peak_water_level_ft"] - current["start_water_level_ft"]
+            current["rise_ft"] = current["surge_peak_water_level_ft"] - current["start_water_level_ft"]
         else:
             current["event_id"] = f"NWCL1_{current['event_start_utc']:%Y%m%d_%H%M}"
             merged.append(current)
@@ -147,10 +196,11 @@ def find_exceedance_events(water: pd.DataFrame, settings: EventSettings) -> pd.D
         event_df = df[(df["datetime_utc"] >= window_start) & (df["datetime_utc"] <= window_end)].copy()
         if event_df.empty:
             continue
-        peak_idx = event_df["smooth_water_level_ft"].idxmax()
+        water_peak_idx = event_df["smooth_water_level_ft"].idxmax()
+        surge_peak_time, surge_peak_level, post_surge_dip = _find_surge_peak(event_df, exceed_start, settings)
         start_level = float(event_df.iloc[0]["smooth_water_level_ft"])
         end_level = float(event_df.iloc[-1]["smooth_water_level_ft"])
-        peak_level = float(event_df.loc[peak_idx, "smooth_water_level_ft"])
+        water_peak_level = float(event_df.loc[water_peak_idx, "smooth_water_level_ft"])
         rows.append(
             {
                 "event_id": f"NWCL1_{window_start:%Y%m%d_%H%M}",
@@ -160,11 +210,16 @@ def find_exceedance_events(water: pd.DataFrame, settings: EventSettings) -> pd.D
                 "exceed_end_utc": exceed_end,
                 "window_start_utc": window_start,
                 "window_end_utc": window_end,
-                "peak_time_utc": event_df.loc[peak_idx, "datetime_utc"],
-                "peak_water_level_ft": peak_level,
+                "surge_peak_time_utc": surge_peak_time,
+                "surge_peak_water_level_ft": surge_peak_level,
+                "water_level_peak_time_utc": event_df.loc[water_peak_idx, "datetime_utc"],
+                "water_level_peak_ft": water_peak_level,
+                "post_surge_dip_ft": post_surge_dip,
+                "peak_time_utc": surge_peak_time,
+                "peak_water_level_ft": surge_peak_level,
                 "start_water_level_ft": start_level,
                 "end_water_level_ft": end_level,
-                "rise_ft": peak_level - start_level,
+                "rise_ft": surge_peak_level - start_level,
                 "duration_hours": (window_end - window_start).total_seconds() / 3600,
                 "source_event_count": 1,
             }
