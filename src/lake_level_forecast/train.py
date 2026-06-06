@@ -14,6 +14,10 @@ from sklearn.preprocessing import StandardScaler
 from lake_level_forecast.features import feature_columns
 
 
+def _rmse(y_true, y_pred) -> float:
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
 def train_models(table: pd.DataFrame, forecast_hours: list[int], split_date: str, model_dir: str | Path, plot_dir: str | Path | None = None) -> pd.DataFrame:
     model_path = Path(model_dir)
     model_path.mkdir(parents=True, exist_ok=True)
@@ -45,10 +49,10 @@ def train_models(table: pd.DataFrame, forecast_hours: list[int], split_date: str
         pred = model.predict(test[features])
         y_test = test[target]
         mae = mean_absolute_error(y_test, pred)
-        rmse = mean_squared_error(y_test, pred, squared=False)
+        rmse = _rmse(y_test, pred)
         baseline = np.zeros_like(y_test, dtype=float)
         baseline_mae = mean_absolute_error(y_test, baseline)
-        baseline_rmse = mean_squared_error(y_test, baseline, squared=False)
+        baseline_rmse = _rmse(y_test, baseline)
         joblib.dump({"model": model, "features": features, "target": target, "horizon_hr": hr}, model_path / f"ridge_delta_{hr}h.joblib")
         rows.append(
             {
