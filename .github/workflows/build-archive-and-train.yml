@@ -6,7 +6,7 @@ on:
 jobs:
   build-and-train:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       SYNOPTIC_TOKEN: ${{ secrets.SYNOPTIC_TOKEN }}
 
@@ -34,17 +34,26 @@ jobs:
       - name: Fetch KNEW wind for events
         run: python scripts/03_fetch_knew_wind_for_events.py
 
-      - name: Build training table
+      - name: Build event training table
         run: python scripts/04_build_training_table.py
 
-      - name: Train models
+      - name: Train event models
         run: python scripts/05_train_models.py
 
-      - name: Analyze models
+      - name: Analyze event models
         run: python scripts/07_analyze_model.py --decimals 2
 
-      - name: Summarize wind-rise findings
+      - name: Summarize event wind-rise findings
         run: python scripts/08_summarize_wind_rise_findings.py --decimals 2
+
+      - name: Fetch full KNEW wind archive
+        run: python scripts/09_fetch_knew_wind_archive.py
+
+      - name: Build continuous training table
+        run: python scripts/10_build_continuous_training_table.py
+
+      - name: Train continuous delta models
+        run: python scripts/train_continuous_models.py
 
       - name: Upload generated archive, models, metrics, and findings
         uses: actions/upload-artifact@v4
