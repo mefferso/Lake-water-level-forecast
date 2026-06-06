@@ -18,6 +18,8 @@ def main() -> None:
         model_dir=REPO_ROOT / "models",
         plot_dir=REPO_ROOT / "outputs/plots",
     )
+    numeric_cols = metrics.select_dtypes(include=["number"]).columns
+    metrics[numeric_cols] = metrics[numeric_cols].round(2)
     metrics.to_csv(REPO_ROOT / "outputs/tables/model_metrics.csv", index=False)
     print(metrics)
 
