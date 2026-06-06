@@ -1,0 +1,20 @@
+water_level:
+  station_id: "8761927"
+  station_name: "NWCL1"
+  datum: "MLLW"
+  units: "english"
+  time_zone: "gmt"
+  threshold_ft: 2.0
+  years_back: 5
+  event_merge_gap_hours: 6
+  event_padding_hours: 72
+
+wind:
+  station_id: "KNEW"
+  units: "english"
+
+model:
+  resample_minutes: 15
+  forecast_hours: [6, 12, 18, 24]
+  wind_lag_hours: [1, 3, 6, 12, 24]
+  train_test_split_date: "2025-01-01"
