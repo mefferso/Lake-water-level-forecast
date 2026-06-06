@@ -4,6 +4,18 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+EVENT_COLUMNS = [
+    "event_id",
+    "event_start_utc",
+    "event_end_utc",
+    "window_start_utc",
+    "window_end_utc",
+    "peak_time_utc",
+    "peak_water_level_ft",
+    "duration_hours",
+    "source_event_count",
+]
+
 
 @dataclass(frozen=True)
 class EventSettings:
@@ -12,18 +24,61 @@ class EventSettings:
     padding_hours: float = 72.0
 
 
+def _empty_events() -> pd.DataFrame:
+    return pd.DataFrame(columns=EVENT_COLUMNS)
+
+
+def _merge_overlapping_windows(events: pd.DataFrame) -> pd.DataFrame:
+    """Merge padded windows that overlap.
+
+    A long lake setup can repeatedly dip just below 2 ft, creating many tiny
+    exceedance events. Once 72 hours of padding is added, those windows often
+    overlap heavily. Treat those as one compound high-water episode so we do
+    not download the same KNEW wind window over and over.
+    """
+    if events.empty:
+        return _empty_events()
+
+    events = events.sort_values("window_start_utc").reset_index(drop=True)
+    merged = []
+    current = events.iloc[0].to_dict()
+    current["source_event_count"] = 1
+
+    for _, row in events.iloc[1:].iterrows():
+        row_dict = row.to_dict()
+        if row_dict["window_start_utc"] <= current["window_end_utc"]:
+            current["event_end_utc"] = max(current["event_end_utc"], row_dict["event_end_utc"])
+            current["window_end_utc"] = max(current["window_end_utc"], row_dict["window_end_utc"])
+            current["duration_hours"] = (current["event_end_utc"] - current["event_start_utc"]).total_seconds() / 3600
+            current["source_event_count"] += 1
+            if row_dict["peak_water_level_ft"] > current["peak_water_level_ft"]:
+                current["peak_water_level_ft"] = row_dict["peak_water_level_ft"]
+                current["peak_time_utc"] = row_dict["peak_time_utc"]
+        else:
+            current["event_id"] = f"NWCL1_{current['event_start_utc']:%Y%m%d_%H%M}"
+            merged.append(current)
+            current = row_dict
+            current["source_event_count"] = 1
+
+    current["event_id"] = f"NWCL1_{current['event_start_utc']:%Y%m%d_%H%M}"
+    merged.append(current)
+    return pd.DataFrame(merged)[EVENT_COLUMNS].sort_values("event_start_utc").reset_index(drop=True)
+
+
 def find_exceedance_events(water: pd.DataFrame, settings: EventSettings) -> pd.DataFrame:
     df = water.copy()
     if df.empty:
-        return pd.DataFrame()
+        return _empty_events()
     df["datetime_utc"] = pd.to_datetime(df["datetime_utc"], utc=True)
     df = df.sort_values("datetime_utc")
     exceed = df[df["water_level_ft"] >= settings.threshold_ft].copy()
     if exceed.empty:
-        return pd.DataFrame()
+        return _empty_events()
+
     gap = pd.Timedelta(hours=settings.merge_gap_hours)
     exceed["new_event"] = exceed["datetime_utc"].diff().gt(gap).fillna(True)
     exceed["event_num"] = exceed["new_event"].cumsum()
+
     rows = []
     pad = pd.Timedelta(hours=settings.padding_hours)
     for _, group in exceed.groupby("event_num"):
@@ -42,7 +97,9 @@ def find_exceedance_events(water: pd.DataFrame, settings: EventSettings) -> pd.D
                 "duration_hours": (end - start).total_seconds() / 3600,
             }
         )
-    return pd.DataFrame(rows).sort_values("event_start_utc").reset_index(drop=True)
+
+    raw_events = pd.DataFrame(rows).sort_values("event_start_utc").reset_index(drop=True)
+    return _merge_overlapping_windows(raw_events)
 
 
 def subset_water_to_event_windows(water: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
