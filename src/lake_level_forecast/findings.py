@@ -51,13 +51,34 @@ def _mean_direction_deg(directions: pd.Series) -> float:
     return float((np.rad2deg(np.arctan2(s, c)) + 360) % 360)
 
 
+def _event_peak_time(ev: pd.Series) -> pd.Timestamp:
+    if "surge_peak_time_utc" in ev.index and pd.notna(ev["surge_peak_time_utc"]):
+        return ev["surge_peak_time_utc"]
+    return ev["peak_time_utc"]
+
+
+def _event_peak_level(ev: pd.Series) -> float:
+    if "surge_peak_water_level_ft" in ev.index and pd.notna(ev["surge_peak_water_level_ft"]):
+        return float(ev["surge_peak_water_level_ft"])
+    return float(ev["peak_water_level_ft"])
+
+
 def make_event_wind_summary(events: pd.DataFrame, wind: pd.DataFrame, decimals: int = 2) -> pd.DataFrame:
     if events.empty or wind.empty:
         return pd.DataFrame()
 
     events = events.copy()
     wind = wind.copy()
-    for col in ["event_start_utc", "event_end_utc", "peak_time_utc", "exceed_start_utc", "exceed_end_utc"]:
+    time_cols = [
+        "event_start_utc",
+        "event_end_utc",
+        "peak_time_utc",
+        "surge_peak_time_utc",
+        "water_level_peak_time_utc",
+        "exceed_start_utc",
+        "exceed_end_utc",
+    ]
+    for col in time_cols:
         if col in events.columns:
             events[col] = pd.to_datetime(events[col], utc=True)
     wind["datetime_utc"] = pd.to_datetime(wind["datetime_utc"], utc=True)
@@ -69,7 +90,9 @@ def make_event_wind_summary(events: pd.DataFrame, wind: pd.DataFrame, decimals: 
         if w.empty:
             continue
 
-        setup = w[(w["datetime_utc"] >= ev["event_start_utc"]) & (w["datetime_utc"] <= ev["peak_time_utc"])]
+        peak_time = _event_peak_time(ev)
+        peak_level = _event_peak_level(ev)
+        setup = w[(w["datetime_utc"] >= ev["event_start_utc"]) & (w["datetime_utc"] <= peak_time)]
         if setup.empty:
             setup = w
 
@@ -77,11 +100,13 @@ def make_event_wind_summary(events: pd.DataFrame, wind: pd.DataFrame, decimals: 
             {
                 "event_id": event_id,
                 "event_start_utc": ev["event_start_utc"],
-                "peak_time_utc": ev["peak_time_utc"],
+                "surge_peak_time_utc": peak_time,
                 "event_end_utc": ev["event_end_utc"],
                 "rise_ft": ev["rise_ft"],
-                "peak_water_level_ft": ev["peak_water_level_ft"],
-                "duration_to_peak_hr": (ev["peak_time_utc"] - ev["event_start_utc"]).total_seconds() / 3600,
+                "surge_peak_water_level_ft": peak_level,
+                "water_level_peak_ft": ev.get("water_level_peak_ft", peak_level),
+                "post_surge_dip_ft": ev.get("post_surge_dip_ft", np.nan),
+                "duration_to_surge_peak_hr": (peak_time - ev["event_start_utc"]).total_seconds() / 3600,
                 "mean_wind_speed_kt": setup["wind_speed_kt"].mean(),
                 "max_wind_speed_kt": setup["wind_speed_kt"].max(),
                 "mean_wind_gust_kt": setup["wind_gust_kt"].mean(),
@@ -115,8 +140,8 @@ def make_wind_rise_lookup(event_summary: pd.DataFrame, decimals: int = 2) -> pd.
                 "mean_rise_ft": g["rise_ft"].mean(),
                 "p75_rise_ft": g["rise_ft"].quantile(0.75),
                 "max_rise_ft": g["rise_ft"].max(),
-                "median_peak_water_level_ft": g["peak_water_level_ft"].median(),
-                "median_duration_to_peak_hr": g["duration_to_peak_hr"].median(),
+                "median_surge_peak_water_level_ft": g["surge_peak_water_level_ft"].median(),
+                "median_duration_to_surge_peak_hr": g["duration_to_surge_peak_hr"].median(),
             }
         )
     out = pd.DataFrame(rows)
@@ -146,18 +171,14 @@ def make_rise_threshold_findings(event_summary: pd.DataFrame, decimals: int = 2)
                 "median_max_wind_speed_kt": g["max_wind_speed_kt"].median(),
                 "median_max_gust_kt": g["max_wind_gust_kt"].median(),
                 "most_common_direction_bin": dir_counts.index[0] if not dir_counts.empty else "missing",
-                "median_duration_to_peak_hr": g["duration_to_peak_hr"].median(),
-                "median_peak_water_level_ft": g["peak_water_level_ft"].median(),
+                "median_duration_to_surge_peak_hr": g["duration_to_surge_peak_hr"].median(),
+                "median_surge_peak_water_level_ft": g["surge_peak_water_level_ft"].median(),
             }
         )
     return _round_numeric(pd.DataFrame(rows), decimals)
 
 
-def write_findings_summary(
-    lookup: pd.DataFrame,
-    thresholds: pd.DataFrame,
-    output_path: str | Path,
-) -> None:
+def write_findings_summary(lookup: pd.DataFrame, thresholds: pd.DataFrame, output_path: str | Path) -> None:
     lines = ["# NWCL1 Wind/Rise Findings", ""]
     lines.append("## Rise thresholds")
     lines.append("")
@@ -166,9 +187,9 @@ def write_findings_summary(
     else:
         for _, row in thresholds.iterrows():
             lines.append(
-                f"- Rise >= {row['rise_threshold_ft']:.2f} ft: median mean wind {row['median_mean_wind_speed_kt']:.2f} kt, "
+                f"- Surge rise >= {row['rise_threshold_ft']:.2f} ft: median mean wind {row['median_mean_wind_speed_kt']:.2f} kt, "
                 f"median max wind {row['median_max_wind_speed_kt']:.2f} kt, common direction {row['most_common_direction_bin']}, "
-                f"median time to peak {row['median_duration_to_peak_hr']:.2f} hr."
+                f"median time to surge peak {row['median_duration_to_surge_peak_hr']:.2f} hr."
             )
     lines.append("")
     lines.append("## Wind-bin lookup")
@@ -181,6 +202,6 @@ def write_findings_summary(
                 continue
             lines.append(
                 f"- {row['wind_direction_bin']} wind, {row['mean_wind_speed_bin_kt']} kt mean: "
-                f"median rise {row['median_rise_ft']:.2f} ft from {int(row['event_count'])} events."
+                f"median surge rise {row['median_rise_ft']:.2f} ft from {int(row['event_count'])} events."
             )
     Path(output_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
