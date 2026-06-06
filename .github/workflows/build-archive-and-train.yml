@@ -1,0 +1,50 @@
+name: Build archive and train models
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SYNOPTIC_TOKEN: ${{ secrets.SYNOPTIC_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Fetch NWCL1 water level archive
+        run: python scripts/01_fetch_nwcl1_water.py
+
+      - name: Find high-water events
+        run: python scripts/02_find_high_water_events.py
+
+      - name: Fetch KNEW wind for events
+        run: python scripts/03_fetch_knew_wind_for_events.py
+
+      - name: Build training table
+        run: python scripts/04_build_training_table.py
+
+      - name: Train models
+        run: python scripts/05_train_models.py
+
+      - name: Upload generated archive, models, and metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: nwcl1-training-output
+          path: |
+            data/processed/
+            models/
+            outputs/
