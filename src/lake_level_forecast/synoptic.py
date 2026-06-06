@@ -9,6 +9,15 @@ import pandas as pd
 import requests
 
 SYNOPTIC_TIMESERIES_API = "https://api.synopticdata.com/v2/stations/timeseries"
+WIND_COLUMNS = [
+    "station",
+    "datetime_utc",
+    "wind_speed_kt",
+    "wind_dir_deg",
+    "wind_gust_kt",
+    "air_temp_f",
+    "pressure_mb",
+]
 
 
 @dataclass(frozen=True)
@@ -16,6 +25,10 @@ class SynopticRequest:
     station: str
     token: str
     units: str = "english"
+
+
+def _empty_wind_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=WIND_COLUMNS)
 
 
 def _as_utc_timestamp(dt: datetime | pd.Timestamp) -> pd.Timestamp:
@@ -45,10 +58,12 @@ def _series_value(values: list[Any] | None, idx: int) -> Any:
 def parse_synoptic_timeseries(payload: dict[str, Any], station: str) -> pd.DataFrame:
     stations = payload.get("STATION", [])
     if not stations:
-        return pd.DataFrame(columns=["station", "datetime_utc", "wind_speed_kt", "wind_dir_deg", "wind_gust_kt", "air_temp_f", "pressure_mb"])
+        return _empty_wind_df()
     st = stations[0]
     obs = st.get("OBSERVATIONS", {})
     times = obs.get("date_time", [])
+    if not times:
+        return _empty_wind_df()
     speed = _first_existing(obs, "wind_speed")
     direction = _first_existing(obs, "wind_direction")
     gust = _first_existing(obs, "wind_gust")
@@ -88,9 +103,18 @@ def fetch_wind_timeseries(start: datetime | pd.Timestamp, end: datetime | pd.Tim
     r = requests.get(SYNOPTIC_TIMESERIES_API, params=params, timeout=90)
     r.raise_for_status()
     payload = r.json()
-    status = payload.get("SUMMARY", {}).get("RESPONSE_CODE")
+    summary = payload.get("SUMMARY", {})
+    status = summary.get("RESPONSE_CODE")
+    message = str(summary.get("RESPONSE_MESSAGE", ""))
+
+    # Synoptic returns RESPONSE_CODE 2 for no data/no station access in a specific window.
+    # For old METAR chunks, we do not want one empty KNEW period to kill the whole archive.
+    if status == 2 or "No stations found" in message:
+        print(f"  warning: no Synoptic data for {req.station} {_fmt(start)}-{_fmt(end)}; skipping chunk")
+        return _empty_wind_df()
+
     if status not in (1, None):
-        raise RuntimeError(f"Synoptic API error: {payload.get('SUMMARY')}")
+        raise RuntimeError(f"Synoptic API error: {summary}")
     return parse_synoptic_timeseries(payload, req.station)
 
 
@@ -110,19 +134,27 @@ def fetch_wind_timeseries_chunked(
         frames.append(fetch_wind_timeseries(cursor, chunk_end, req))
         cursor = chunk_end
     if not frames:
-        return pd.DataFrame(columns=["station", "datetime_utc", "wind_speed_kt", "wind_dir_deg", "wind_gust_kt", "air_temp_f", "pressure_mb"])
-    return pd.concat(frames, ignore_index=True).drop_duplicates("datetime_utc").sort_values("datetime_utc")
+        return _empty_wind_df()
+    out = pd.concat(frames, ignore_index=True)
+    if out.empty:
+        return _empty_wind_df()
+    return out.drop_duplicates("datetime_utc").sort_values("datetime_utc")
 
 
 def fetch_wind_for_events(events: pd.DataFrame, station: str, token: str, raw_dir: str | Path | None = None) -> pd.DataFrame:
     frames = []
     req = SynopticRequest(station=station, token=token)
+    skipped_events = 0
     for _, ev in events.iterrows():
         event_id = ev["event_id"]
         start = pd.Timestamp(ev["window_start_utc"])
         end = pd.Timestamp(ev["window_end_utc"])
         print(f"Synoptic {station} {event_id} {start} to {end}")
         df = fetch_wind_timeseries_chunked(start, end, req)
+        if df.empty:
+            skipped_events += 1
+            print(f"  warning: no usable wind rows for {event_id}; event will be skipped downstream")
+            continue
         df["event_id"] = event_id
         if raw_dir is not None:
             raw_path = Path(raw_dir)
@@ -130,5 +162,7 @@ def fetch_wind_for_events(events: pd.DataFrame, station: str, token: str, raw_di
             df.to_csv(raw_path / f"synoptic_{station}_{event_id}.csv", index=False)
         frames.append(df)
     if not frames:
-        return pd.DataFrame()
+        print(f"No Synoptic wind data found for any event. Skipped events: {skipped_events}")
+        return pd.DataFrame(columns=WIND_COLUMNS + ["event_id"])
+    print(f"Synoptic wind fetch complete. Events with no wind data skipped: {skipped_events}")
     return pd.concat(frames, ignore_index=True).drop_duplicates(["event_id", "datetime_utc"]).sort_values(["event_id", "datetime_utc"])
