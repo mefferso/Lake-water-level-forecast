@@ -18,13 +18,15 @@ class SynopticRequest:
     units: str = "english"
 
 
-def _fmt(dt: datetime | pd.Timestamp) -> str:
+def _as_utc_timestamp(dt: datetime | pd.Timestamp) -> pd.Timestamp:
     ts = pd.Timestamp(dt)
     if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    else:
-        ts = ts.tz_convert("UTC")
-    return ts.strftime("%Y%m%d%H%M")
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _fmt(dt: datetime | pd.Timestamp) -> str:
+    return _as_utc_timestamp(dt).strftime("%Y%m%d%H%M")
 
 
 def _first_existing(obs: dict[str, Any], base: str) -> list[Any] | None:
@@ -92,6 +94,26 @@ def fetch_wind_timeseries(start: datetime | pd.Timestamp, end: datetime | pd.Tim
     return parse_synoptic_timeseries(payload, req.station)
 
 
+def fetch_wind_timeseries_chunked(
+    start: datetime | pd.Timestamp,
+    end: datetime | pd.Timestamp,
+    req: SynopticRequest,
+    chunk_hours: int = 24,
+) -> pd.DataFrame:
+    start_ts = _as_utc_timestamp(start)
+    end_ts = _as_utc_timestamp(end)
+    cursor = start_ts
+    frames = []
+    while cursor < end_ts:
+        chunk_end = min(cursor + pd.Timedelta(hours=chunk_hours), end_ts)
+        print(f"  chunk {cursor} to {chunk_end}")
+        frames.append(fetch_wind_timeseries(cursor, chunk_end, req))
+        cursor = chunk_end
+    if not frames:
+        return pd.DataFrame(columns=["station", "datetime_utc", "wind_speed_kt", "wind_dir_deg", "wind_gust_kt", "air_temp_f", "pressure_mb"])
+    return pd.concat(frames, ignore_index=True).drop_duplicates("datetime_utc").sort_values("datetime_utc")
+
+
 def fetch_wind_for_events(events: pd.DataFrame, station: str, token: str, raw_dir: str | Path | None = None) -> pd.DataFrame:
     frames = []
     req = SynopticRequest(station=station, token=token)
@@ -100,7 +122,7 @@ def fetch_wind_for_events(events: pd.DataFrame, station: str, token: str, raw_di
         start = pd.Timestamp(ev["window_start_utc"])
         end = pd.Timestamp(ev["window_end_utc"])
         print(f"Synoptic {station} {event_id} {start} to {end}")
-        df = fetch_wind_timeseries(start, end, req)
+        df = fetch_wind_timeseries_chunked(start, end, req)
         df["event_id"] = event_id
         if raw_dir is not None:
             raw_path = Path(raw_dir)
