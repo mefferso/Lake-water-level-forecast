@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Data/model outputs
+# Keep folder placeholders, but do not commit bulk generated data.
+data/raw/**/*.csv
+data/raw/**/*.json
+data/raw/**/*.parquet
+data/processed/**/*.csv
+data/processed/**/*.parquet
+models/*.joblib
+outputs/plots/*.png
+outputs/tables/*.csv
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
