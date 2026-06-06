@@ -43,7 +43,10 @@ jobs:
       - name: Analyze models
         run: python scripts/07_analyze_model.py --decimals 2
 
-      - name: Upload generated archive, models, and metrics
+      - name: Summarize wind-rise findings
+        run: python scripts/08_summarize_wind_rise_findings.py --decimals 2
+
+      - name: Upload generated archive, models, metrics, and findings
         uses: actions/upload-artifact@v4
         with:
           name: nwcl1-training-output
