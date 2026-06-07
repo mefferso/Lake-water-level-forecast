@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Radar QPF / Storm Total Precip Map</title>
+
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIINfQPD/8iHkQ3rrE2/X4M8o3V6JZ6K3BM="
+    crossorigin=""
+  />
+
+  <style>
+    html, body, #map {
+      height: 100%;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .title-box {
+      position: absolute;
+      top: 12px;
+      left: 50px;
+      z-index: 1000;
+      background: rgba(255, 255, 255, 0.92);
+      padding: 10px 14px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      max-width: 360px;
+    }
+
+    .title-box h1 {
+      margin: 0 0 4px 0;
+      font-size: 18px;
+    }
+
+    .title-box div {
+      font-size: 12px;
+      color: #333;
+      line-height: 1.3;
+    }
+
+    .control-box {
+      background: rgba(255, 255, 255, 0.94);
+      padding: 12px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      min-width: 220px;
+    }
+
+    .control-box h2 {
+      font-size: 15px;
+      margin: 0 0 8px 0;
+    }
+
+    .control-box label {
+      display: block;
+      margin: 7px 0;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    .control-box select,
+    .control-box input[type="range"] {
+      width: 100%;
+      margin-top: 4px;
+    }
+
+    .control-note {
+      margin-top: 9px;
+      font-size: 11px;
+      color: #444;
+      line-height: 1.3;
+    }
+
+    .legend {
+      background: rgba(255, 255, 255, 0.94);
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      font-size: 12px;
+      line-height: 1.25;
+    }
+
+    .legend-title {
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+
+    .legend-gradient {
+      width: 220px;
+      height: 12px;
+      background: linear-gradient(to right,
+        #f7fbff,
+        #c6dbef,
+        #6baed6,
+        #2171b5,
+        #41ab5d,
+        #ffff00,
+        #fd8d3c,
+        #f03b20,
+        #bd0026,
+        #800026
+      );
+      border: 1px solid #555;
+      margin-bottom: 4px;
+    }
+
+    .legend-scale {
+      display: flex;
+      justify-content: space-between;
+      width: 220px;
+      font-size: 11px;
+    }
+
+    .leaflet-control-attribution {
+      font-size: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="title-box">
+    <h1>Radar / MRMS Precip Accumulation</h1>
+    <div>
+      Toggle KHDC, KMOB, and MRMS precip layers. Use the opacity slider when things turn into Skittles soup.
+    </div>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    const map = L.map('map', {
+      center: [30.45, -89.6],
+      zoom: 8,
+      preferCanvas: true
+    });
+
+    const baseLayers = {
+      "OpenStreetMap": L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+      }),
+      "Esri World Imagery": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19,
+        attribution: 'Tiles &copy; Esri'
+      }),
+      "Carto Light": L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+      })
+    };
+
+    baseLayers["OpenStreetMap"].addTo(map);
+
+    /*
+      IMPORTANT:
+      These WMS layer names may need adjustment depending on the NOAA service catalog.
+      The page is built so you only have to edit the config below when endpoints/layer names change.
+
+      Radar single-site precip products are not always exposed as clean public XYZ tiles.
+      If a WMS layer fails, open browser DevTools > Network and check the GetMap response.
+    */
+    const precipLayerConfig = {
+      khdc: {
+        label: "KHDC Storm Total Precip",
+        url: "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows",
+        layers: "conus_bref_qcd",
+        radarId: "KHDC",
+        note: "Placeholder WMS layer. Swap to KHDC storm-total precip source when available."
+      },
+      kmob: {
+        label: "KMOB Storm Total Precip",
+        url: "https://opengeo.ncep.noaa.gov/geoserver/conus/conus_bref_qcd/ows",
+        layers: "conus_bref_qcd",
+        radarId: "KMOB",
+        note: "Placeholder WMS layer. Swap to KMOB storm-total precip source when available."
+      },
+      mrms: {
+        label: "MRMS QPE / Precip Accumulation",
+        url: "https://opengeo.ncep.noaa.gov/geoserver/mrms/ows",
+        layers: "mrms:MultiSensor_QPE_01H_Pass2",
+        radarId: null,
+        note: "MRMS example layer. Change to 3H/6H/24H/storm-total layer if desired."
+      }
+    };
+
+    const precipLayers = {};
+    let activeLayerKey = "mrms";
+    let opacity = 0.72;
+
+    function createWmsLayer(key) {
+      const cfg = precipLayerConfig[key];
+
+      const params = {
+        layers: cfg.layers,
+        format: 'image/png',
+        transparent: true,
+        opacity,
+        version: '1.3.0',
+        attribution: 'NOAA / NWS / NCEP'
+      };
+
+      // Some WMS services can filter by radar ID using CQL_FILTER; others ignore/reject it.
+      // Left disabled by default because public service schemas vary.
+      // if (cfg.radarId) params.CQL_FILTER = `radar_id='${cfg.radarId}'`;
+
+      return L.tileLayer.wms(cfg.url, params);
+    }
+
+    Object.keys(precipLayerConfig).forEach(key => {
+      precipLayers[key] = createWmsLayer(key);
+    });
+
+    precipLayers[activeLayerKey].addTo(map);
+
+    const ControlBox = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: function () {
+        const div = L.DomUtil.create('div', 'control-box');
+        div.innerHTML = `
+          <h2>Precip Layer</h2>
+          <label><input type="radio" name="precip-source" value="khdc"> KHDC radar</label>
+          <label><input type="radio" name="precip-source" value="kmob"> KMOB radar</label>
+          <label><input type="radio" name="precip-source" value="mrms" checked> MRMS</label>
+
+          <label style="margin-top:10px;">
+            Opacity
+            <input id="opacity-slider" type="range" min="0" max="1" step="0.05" value="0.72">
+          </label>
+
+          <label style="margin-top:10px;">
+            Accumulation Type
+            <select id="accum-select">
+              <option value="storm_total">Storm Total</option>
+              <option value="1h" selected>1 Hour</option>
+              <option value="3h">3 Hour</option>
+              <option value="6h">6 Hour</option>
+              <option value="24h">24 Hour</option>
+            </select>
+          </label>
+
+          <div id="layer-note" class="control-note"></div>
+        `;
+
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+        return div;
+      }
+    });
+
+    map.addControl(new ControlBox());
+
+    function setLayerNote() {
+      const noteEl = document.getElementById('layer-note');
+      if (!noteEl) return;
+      const cfg = precipLayerConfig[activeLayerKey];
+      noteEl.textContent = cfg.note;
+    }
+
+    function switchPrecipLayer(key) {
+      if (!precipLayers[key]) return;
+
+      Object.values(precipLayers).forEach(layer => {
+        if (map.hasLayer(layer)) map.removeLayer(layer);
+      });
+
+      activeLayerKey = key;
+      precipLayers[key].setOpacity(opacity);
+      precipLayers[key].addTo(map);
+      setLayerNote();
+    }
+
+    function updateAccumulationLayer(period) {
+      // MRMS layer names can vary by service/version. Edit here once you settle on the exact NOAA layer names.
+      const mrmsLayersByPeriod = {
+        "1h": "mrms:MultiSensor_QPE_01H_Pass2",
+        "3h": "mrms:MultiSensor_QPE_03H_Pass2",
+        "6h": "mrms:MultiSensor_QPE_06H_Pass2",
+        "24h": "mrms:MultiSensor_QPE_24H_Pass2",
+        "storm_total": "mrms:MultiSensor_QPE_24H_Pass2"
+      };
+
+      if (mrmsLayersByPeriod[period]) {
+        precipLayerConfig.mrms.layers = mrmsLayersByPeriod[period];
+      }
+
+      // Radar layer placeholders remain unchanged because single-site storm-total products need a confirmed service/layer.
+      const wasActive = activeLayerKey;
+      Object.keys(precipLayers).forEach(key => {
+        if (map.hasLayer(precipLayers[key])) map.removeLayer(precipLayers[key]);
+        precipLayers[key] = createWmsLayer(key);
+      });
+      switchPrecipLayer(wasActive);
+    }
+
+    document.querySelectorAll('input[name="precip-source"]').forEach(input => {
+      input.addEventListener('change', event => switchPrecipLayer(event.target.value));
+    });
+
+    document.getElementById('opacity-slider').addEventListener('input', event => {
+      opacity = Number(event.target.value);
+      Object.values(precipLayers).forEach(layer => layer.setOpacity(opacity));
+    });
+
+    document.getElementById('accum-select').addEventListener('change', event => {
+      updateAccumulationLayer(event.target.value);
+    });
+
+    L.control.layers(baseLayers, null, { collapsed: true }).addTo(map);
+
+    const radarSites = L.layerGroup([
+      L.marker([30.5194, -90.4176]).bindPopup('<b>KHDC</b><br>Hammond, LA radar'),
+      L.marker([30.6795, -88.2397]).bindPopup('<b>KMOB</b><br>Mobile, AL radar')
+    ]).addTo(map);
+
+    const rangeRings = L.layerGroup([
+      L.circle([30.5194, -90.4176], { radius: 230000, color: '#333', weight: 1, fill: false, opacity: 0.35 }).bindPopup('Approx KHDC 124 nm range ring'),
+      L.circle([30.6795, -88.2397], { radius: 230000, color: '#333', weight: 1, fill: false, opacity: 0.35 }).bindPopup('Approx KMOB 124 nm range ring')
+    ]).addTo(map);
+
+    L.control.layers(null, {
+      "Radar sites": radarSites,
+      "Approx radar range rings": rangeRings
+    }, { collapsed: true }).addTo(map);
+
+    const Legend = L.Control.extend({
+      options: { position: 'bottomright' },
+      onAdd: function () {
+        const div = L.DomUtil.create('div', 'legend');
+        div.innerHTML = `
+          <div class="legend-title">Precip Accumulation</div>
+          <div class="legend-gradient"></div>
+          <div class="legend-scale"><span>Low</span><span>High</span></div>
+          <div style="margin-top:6px;">Legend is approximate until exact WMS style is locked in.</div>
+        `;
+        return div;
+      }
+    });
+
+    map.addControl(new Legend());
+    setLayerNote();
+  </script>
+</body>
+</html>
